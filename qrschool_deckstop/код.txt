@@ -1,0 +1,621 @@
+Отлично! Теперь изменим окно авторизации и систему авторизации, чтобы использовать незахешированный пароль из БД для упрощения тестирования.
+
+## 1. Обновленная модель User.cs
+
+```csharp
+using System;
+
+namespace InventoryApp.Models
+{
+    public class User
+    {
+        public int Id { get; set; }
+        public string Username { get; set; }
+        public string PasswordHash { get; set; }
+        public string PasswordPlain { get; set; } // Новое поле для открытого пароля
+        public string FullName { get; set; }
+        public string Role { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public DateTime? LastLogin { get; set; }
+        
+        public User()
+        {
+            Username = "";
+            PasswordHash = "";
+            PasswordPlain = "";
+            FullName = "";
+            Role = "";
+            CreatedAt = DateTime.Now;
+        }
+    }
+}
+```
+
+## 2. Обновленный UserRepository.cs
+
+```csharp
+using Dapper;
+using InventoryApp.Models;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace InventoryApp.DataAccess
+{
+    public class UserRepository
+    {
+        public User GetByUsername(string username)
+        {
+            using (var connection = DatabaseContext.CreateConnection())
+            {
+                // Теперь выбираем и поле password_plain
+                var sql = "SELECT id, username, password_hash, password_plain, full_name, role, created_at, last_login FROM users WHERE username = @Username";
+                return connection.QueryFirstOrDefault<User>(sql, new { Username = username });
+            }
+        }
+        
+        public void UpdateLastLogin(int userId)
+        {
+            using (var connection = DatabaseContext.CreateConnection())
+            {
+                var sql = "UPDATE users SET last_login = NOW() WHERE id = @UserId";
+                connection.Execute(sql, new { UserId = userId });
+            }
+        }
+        
+        public IEnumerable<User> GetAll()
+        {
+            using (var connection = DatabaseContext.CreateConnection())
+            {
+                return connection.Query<User>("SELECT id, username, full_name, role, created_at, last_login FROM users ORDER BY id");
+            }
+        }
+        
+        // Новый метод для проверки пароля (сначала проверяем plain, потом hash)
+        public bool ValidatePassword(User user, string password)
+        {
+            // 1. Проверяем по открытому паролю (для разработки)
+            if (!string.IsNullOrEmpty(user.PasswordPlain) && user.PasswordPlain == password)
+            {
+                return true;
+            }
+            
+            // 2. Если нет открытого пароля или не совпал, проверяем хеш
+            if (!string.IsNullOrEmpty(user.PasswordHash))
+            {
+                var passwordHash = Helpers.PasswordHelper.HashPassword(password);
+                return user.PasswordHash == passwordHash;
+            }
+            
+            return false;
+        }
+        
+        // Новый метод для создания пользователя с открытым паролем
+        public int CreateUser(string username, string password, string fullName, string role)
+        {
+            using (var connection = DatabaseContext.CreateConnection())
+            {
+                var passwordHash = Helpers.PasswordHelper.HashPassword(password);
+                var sql = @"
+                    INSERT INTO users (username, password_hash, password_plain, full_name, role, created_at) 
+                    VALUES (@Username, @PasswordHash, @PasswordPlain, @FullName, @Role, @CreatedAt) 
+                    RETURNING id";
+                
+                return connection.QuerySingle<int>(sql, new
+                {
+                    Username = username,
+                    PasswordHash = passwordHash,
+                    PasswordPlain = password, // Сохраняем открытый пароль для разработки
+                    FullName = fullName,
+                    Role = role,
+                    CreatedAt = System.DateTime.Now
+                });
+            }
+        }
+        
+        // Обновление пароля
+        public bool UpdatePassword(int userId, string newPassword)
+        {
+            using (var connection = DatabaseContext.CreateConnection())
+            {
+                var passwordHash = Helpers.PasswordHelper.HashPassword(newPassword);
+                var sql = @"
+                    UPDATE users 
+                    SET password_hash = @PasswordHash, 
+                        password_plain = @PasswordPlain 
+                    WHERE id = @UserId";
+                
+                return connection.Execute(sql, new
+                {
+                    PasswordHash = passwordHash,
+                    PasswordPlain = newPassword,
+                    UserId = userId
+                }) > 0;
+            }
+        }
+    }
+}
+```
+
+## 3. Обновленный AuthenticationService.cs
+
+```csharp
+using InventoryApp.DataAccess;
+using InventoryApp.Models;
+using System.Windows;
+
+namespace InventoryApp.Services
+{
+    public class AuthenticationService
+    {
+        private readonly UserRepository _userRepository;
+        public User CurrentUser { get; private set; }
+        
+        public AuthenticationService()
+        {
+            _userRepository = new UserRepository();
+        }
+        
+        public bool Login(string username, string password)
+        {
+            // Получаем пользователя из БД
+            var user = _userRepository.GetByUsername(username);
+            if (user == null)
+            {
+                MessageBox.Show($"Пользователь '{username}' не найден", "Ошибка авторизации", 
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+            
+            // Проверяем пароль
+            if (!_userRepository.ValidatePassword(user, password))
+            {
+                MessageBox.Show("Неверный пароль", "Ошибка авторизации", 
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+            
+            // Успешная авторизация
+            CurrentUser = user;
+            _userRepository.UpdateLastLogin(user.Id);
+            
+            // Для отладки показываем информацию о входе
+            MessageBox.Show($"Добро пожаловать, {user.FullName}!\nРоль: {(user.Role == "accountant" ? "Бухгалтер" : "Технический специалист")}", 
+                "Успешный вход", MessageBoxButton.OK, MessageBoxImage.Information);
+            
+            return true;
+        }
+        
+        public void Logout()
+        {
+            CurrentUser = null;
+        }
+        
+        public bool IsAccountant 
+        { 
+            get { return CurrentUser != null && CurrentUser.Role == "accountant"; } 
+        }
+        
+        public bool IsTech 
+        { 
+            get { return CurrentUser != null && CurrentUser.Role == "tech"; } 
+        }
+        
+        // Новый метод для отображения информации о пользователе
+        public string GetUserInfo()
+        {
+            if (CurrentUser == null) return "Не авторизован";
+            return $"{CurrentUser.FullName} ({CurrentUser.Role})";
+        }
+    }
+}
+```
+
+## 4. Обновленное окно авторизации LoginWindow.xaml (с улучшенным дизайном)
+
+```xml
+<Window x:Class="InventoryApp.Views.LoginWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Авторизация - Инвентарный учет" Height="450" Width="550"
+        WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        Background="#F0F0F0">
+    
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        
+        <!-- Верхний баннер -->
+        <Border Grid.Row="0" Background="#007ACC" Height="100">
+            <StackPanel VerticalAlignment="Center" Margin="20">
+                <TextBlock Text="Инвентарный учет" FontSize="28" FontWeight="Bold" Foreground="White"/>
+                <TextBlock Text="Система управления активами" FontSize="14" Foreground="#E0E0E0"/>
+            </StackPanel>
+        </Border>
+        
+        <!-- Форма входа -->
+        <Border Grid.Row="1" Margin="50,30,50,30" Background="White" CornerRadius="10" 
+                BorderBrush="#CCCCCC" BorderThickness="1">
+            <Grid Margin="30">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                
+                <TextBlock Grid.Row="0" Text="Вход в систему" FontSize="22" FontWeight="Bold" 
+                           HorizontalAlignment="Center" Margin="0,0,0,30" Foreground="#333"/>
+                
+                <!-- Поле Логин -->
+                <TextBlock Grid.Row="1" Text="Логин:" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,5" Foreground="#555"/>
+                <TextBox x:Name="txtUsername" Grid.Row="2" FontSize="14" Height="35" 
+                         Padding="10" BorderBrush="#CCCCCC" BorderThickness="1" 
+                         Background="#FAFAFA"/>
+                
+                <!-- Поле Пароль -->
+                <TextBlock Grid.Row="3" Text="Пароль:" FontSize="14" FontWeight="SemiBold" Margin="0,15,0,5" Foreground="#555"/>
+                <PasswordBox x:Name="txtPassword" Grid.Row="4" FontSize="14" Height="35" 
+                             Padding="10" BorderBrush="#CCCCCC" BorderThickness="1"
+                             Background="#FAFAFA"/>
+                
+                <!-- Чекбокс показать пароль -->
+                <CheckBox x:Name="chkShowPassword" Grid.Row="5" Content="Показать пароль" 
+                          Margin="0,10,0,0" FontSize="12" Checked="ChkShowPassword_Checked"
+                          Unchecked="ChkShowPassword_Unchecked"/>
+                
+                <!-- Кнопки -->
+                <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,30,0,0">
+                    <Button x:Name="btnLogin" Content="Войти" Width="120" Height="40" 
+                            FontSize="14" FontWeight="Bold" Click="BtnLogin_Click">
+                        <Button.Style>
+                            <Style TargetType="Button">
+                                <Setter Property="Background" Value="#007ACC"/>
+                                <Setter Property="Foreground" Value="White"/>
+                                <Setter Property="Cursor" Value="Hand"/>
+                                <Setter Property="Template">
+                                    <Setter.Value>
+                                        <ControlTemplate TargetType="Button">
+                                            <Border Background="{TemplateBinding Background}" 
+                                                    CornerRadius="5" Padding="10,5">
+                                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                            </Border>
+                                        </ControlTemplate>
+                                    </Setter.Value>
+                                </Setter>
+                                <Style.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter Property="Background" Value="#005A9E"/>
+                                    </Trigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+                    
+                    <Button x:Name="btnExit" Content="Выход" Width="120" Height="40" 
+                            FontSize="14" Click="BtnExit_Click">
+                        <Button.Style>
+                            <Style TargetType="Button">
+                                <Setter Property="Background" Value="#999999"/>
+                                <Setter Property="Foreground" Value="White"/>
+                                <Setter Property="Cursor" Value="Hand"/>
+                                <Setter Property="Template">
+                                    <Setter.Value>
+                                        <ControlTemplate TargetType="Button">
+                                            <Border Background="{TemplateBinding Background}" 
+                                                    CornerRadius="5" Padding="10,5">
+                                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                            </Border>
+                                        </ControlTemplate>
+                                    </Setter.Value>
+                                </Setter>
+                                <Style.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter Property="Background" Value="#777777"/>
+                                    </Trigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+                </StackPanel>
+                
+                <!-- Информация для тестирования -->
+                <Border Grid.Row="7" Background="#FFF9E6" CornerRadius="5" Padding="10" Margin="0,20,0,0" BorderBrush="#FFE5B4" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="ℹ️ Тестовые учетные записи:" FontWeight="Bold" FontSize="11" Foreground="#856404"/>
+                        <TextBlock Text="Бухгалтер: accountant / 123456" FontSize="10" Foreground="#856404"/>
+                        <TextBlock Text="Техспециалист: tech / 123456" FontSize="10" Foreground="#856404"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
+```
+
+## 5. Обновленное окно авторизации LoginWindow.xaml.cs
+
+```csharp
+using System.Windows;
+using System.Windows.Controls;
+using InventoryApp.Services;
+
+namespace InventoryApp.Views
+{
+    public partial class LoginWindow : Window
+    {
+        private readonly AuthenticationService _authService;
+        
+        public LoginWindow()
+        {
+            InitializeComponent();
+            _authService = new AuthenticationService();
+            
+            // Устанавливаем фокус на поле логина
+            Loaded += (s, e) => txtUsername.Focus();
+        }
+        
+        private void BtnLogin_Click(object sender, RoutedEventArgs e)
+        {
+            var username = txtUsername.Text.Trim();
+            var password = txtPassword.Password;
+            
+            // Валидация
+            if (string.IsNullOrEmpty(username))
+            {
+                MessageBox.Show("Введите логин", "Ошибка", 
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                txtUsername.Focus();
+                return;
+            }
+            
+            if (string.IsNullOrEmpty(password))
+            {
+                MessageBox.Show("Введите пароль", "Ошибка", 
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                txtPassword.Focus();
+                return;
+            }
+            
+            // Пытаемся авторизоваться
+            if (_authService.Login(username, password))
+            {
+                // Открываем нужное окно в зависимости от роли
+                if (_authService.IsAccountant)
+                {
+                    var accountantWindow = new AccountantInventoryWindow(_authService);
+                    accountantWindow.Show();
+                }
+                else if (_authService.IsTech)
+                {
+                    var techWindow = new TechInventoryWindow(_authService);
+                    techWindow.Show();
+                }
+                else
+                {
+                    MessageBox.Show("Неизвестная роль пользователя", "Ошибка", 
+                        MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+                
+                // Закрываем окно авторизации
+                Close();
+            }
+            // Сообщения об ошибках выводятся внутри AuthenticationService
+        }
+        
+        private void BtnExit_Click(object sender, RoutedEventArgs e)
+        {
+            var result = MessageBox.Show("Вы уверены, что хотите выйти?", "Подтверждение", 
+                MessageBoxButton.YesNo, MessageBoxImage.Question);
+            
+            if (result == MessageBoxResult.Yes)
+            {
+                Application.Current.Shutdown();
+            }
+        }
+        
+        // Показать/скрыть пароль
+        private void ChkShowPassword_Checked(object sender, RoutedEventArgs e)
+        {
+            // Создаем временное текстовое поле для отображения пароля
+            if (txtPassword.Password.Length > 0)
+            {
+                var tempTextBox = new TextBox();
+                tempTextBox.Text = txtPassword.Password;
+                tempTextBox.PasswordChar = '\0';
+                
+                // Заменяем PasswordBox на TextBox
+                var parent = txtPassword.Parent as Grid;
+                if (parent != null)
+                {
+                    var row = Grid.GetRow(txtPassword);
+                    var column = Grid.GetColumn(txtPassword);
+                    parent.Children.Remove(txtPassword);
+                    tempTextBox.Name = "txtPasswordVisible";
+                    tempTextBox.FontSize = txtPassword.FontSize;
+                    tempTextBox.Height = txtPassword.Height;
+                    tempTextBox.Padding = txtPassword.Padding;
+                    tempTextBox.Margin = txtPassword.Margin;
+                    Grid.SetRow(tempTextBox, row);
+                    Grid.SetColumn(tempTextBox, column);
+                    parent.Children.Add(tempTextBox);
+                    
+                    // Сохраняем ссылку
+                    txtPassword.Visibility = Visibility.Collapsed;
+                }
+            }
+        }
+        
+        private void ChkShowPassword_Unchecked(object sender, RoutedEventArgs e)
+        {
+            // Возвращаем PasswordBox
+            var parent = txtPassword.Parent as Grid;
+            if (parent != null)
+            {
+                var visibleTextBox = parent.FindName("txtPasswordVisible") as TextBox;
+                if (visibleTextBox != null)
+                {
+                    txtPassword.Password = visibleTextBox.Text;
+                    parent.Children.Remove(visibleTextBox);
+                    txtPassword.Visibility = Visibility.Visible;
+                }
+            }
+        }
+    }
+}
+```
+
+## 6. Упрощенный вариант LoginWindow.xaml.cs (без показа пароля)
+
+Если не нужна функция показа пароля, используйте этот упрощенный вариант:
+
+```csharp
+using System.Windows;
+using InventoryApp.Services;
+
+namespace InventoryApp.Views
+{
+    public partial class LoginWindow : Window
+    {
+        private readonly AuthenticationService _authService;
+        
+        public LoginWindow()
+        {
+            InitializeComponent();
+            _authService = new AuthenticationService();
+            Loaded += (s, e) => txtUsername.Focus();
+        }
+        
+        private void BtnLogin_Click(object sender, RoutedEventArgs e)
+        {
+            var username = txtUsername.Text.Trim();
+            var password = txtPassword.Password;
+            
+            if (string.IsNullOrEmpty(username))
+            {
+                MessageBox.Show("Введите логин", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Warning);
+                txtUsername.Focus();
+                return;
+            }
+            
+            if (string.IsNullOrEmpty(password))
+            {
+                MessageBox.Show("Введите пароль", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Warning);
+                txtPassword.Focus();
+                return;
+            }
+            
+            if (_authService.Login(username, password))
+            {
+                if (_authService.IsAccountant)
+                {
+                    new AccountantInventoryWindow(_authService).Show();
+                }
+                else if (_authService.IsTech)
+                {
+                    new TechInventoryWindow(_authService).Show();
+                }
+                Close();
+            }
+        }
+        
+        private void BtnExit_Click(object sender, RoutedEventArgs e)
+        {
+            if (MessageBox.Show("Вы уверены, что хотите выйти?", "Подтверждение", 
+                MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
+            {
+                Application.Current.Shutdown();
+            }
+        }
+    }
+}
+```
+
+## 7. Дополнительный SQL скрипт для создания тестовых пользователей с открытыми паролями
+
+```sql
+-- Очищаем существующих пользователей
+DELETE FROM users WHERE username IN ('accountant', 'tech', 'test_user');
+
+-- Создаем пользователя-бухгалтера с паролем "123456"
+INSERT INTO users (username, password_hash, password_plain, full_name, role, created_at) 
+VALUES (
+    'accountant',
+    '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92',
+    '123456',
+    'Иванов Иван Иванович',
+    'accountant',
+    NOW()
+);
+
+-- Создаем технического специалиста с паролем "123456"
+INSERT INTO users (username, password_hash, password_plain, full_name, role, created_at) 
+VALUES (
+    'tech',
+    '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92',
+    '123456',
+    'Петров Петр Петрович',
+    'tech',
+    NOW()
+);
+
+-- Дополнительный тестовый пользователь с паролем "test123"
+INSERT INTO users (username, password_hash, password_plain, full_name, role, created_at) 
+VALUES (
+    'test_user',
+    '9d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c93',
+    'test123',
+    'Тестовый Пользователь',
+    'tech',
+    NOW()
+);
+
+-- Проверяем результат
+SELECT id, username, password_plain, full_name, role FROM users;
+```
+
+## 8. Обновление PasswordHelper.cs (добавим метод для проверки пароля)
+
+```csharp
+using System;
+using System.Security.Cryptography;
+using System.Text;
+
+namespace InventoryApp.Helpers
+{
+    public static class PasswordHelper
+    {
+        public static string HashPassword(string password)
+        {
+            using (var sha256 = SHA256.Create())
+            {
+                var hashedBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(password));
+                return Convert.ToBase64String(hashedBytes);
+            }
+        }
+        
+        // Метод для верификации пароля (если нужно проверить только хеш)
+        public static bool VerifyPassword(string password, string hash)
+        {
+            var hashOfInput = HashPassword(password);
+            return hashOfInput == hash;
+        }
+    }
+}
+```
+
+## Основные изменения:
+
+1. **Добавлено поле `PasswordPlain`** в модель User
+2. **Обновлен UserRepository** - теперь читает поле `password_plain` и имеет метод `ValidatePassword`, который сначала проверяет открытый пароль, затем хеш
+3. **Улучшен AuthenticationService** - добавлены информационные сообщения при входе
+4. **Переработан дизайн LoginWindow** - более современный вид, добавлена информация о тестовых учетках
+5. **Добавлена возможность показа пароля** (опционально)
+6. **Улучшена валидация** полей ввода
+
+Теперь система авторизации работает с обоими типами паролей - сначала проверяет открытый (для разработки), затем хешированный (для продакшена). Это очень удобно для тестирования!
