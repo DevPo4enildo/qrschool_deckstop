@@ -43,11 +43,20 @@
                 <DataGridTextColumn Header="Инв. номер" Binding="{Binding InventoryNo}" Width="150"/>
                 <DataGridTextColumn Header="Код" Binding="{Binding Code}" Width="100"/>
                 <DataGridTextColumn Header="Кабинет" Binding="{Binding RoomName}" Width="120"/>
-                <DataGridTextColumn Header="Модель" Binding="{Binding Brand}" Width="150"/>
-                <DataGridTextColumn Header="Модель (детально)" Binding="{Binding Model}" Width="150"/>
+                <DataGridTextColumn Header="ID компьютера" Binding="{Binding ComputerId}" Width="110"/>
+                <DataGridTextColumn Header="Тип" Binding="{Binding Type}" Width="120"/>
+                <DataGridTextColumn Header="Бренд" Binding="{Binding Brand}" Width="150"/>
+                <DataGridTextColumn Header="Модель" Binding="{Binding Model}" Width="150"/>
+                <DataGridTextColumn Header="Диагональ" Binding="{Binding DiagonalInch}" Width="100"/>
                 <DataGridTextColumn Header="Серийный №" Binding="{Binding SerialNumber}" Width="150"/>
                 <DataGridTextColumn Header="Статус" Binding="{Binding Status}" Width="100"/>
+                <DataGridTextColumn Header="Комментарий" Binding="{Binding Comment}" Width="180"/>
+                <DataGridTextColumn Header="Стоимость" Binding="{Binding Cost}" Width="100"/>
+                <DataGridTextColumn Header="Дата покупки" Binding="{Binding PurchaseDate, StringFormat={}{0:dd.MM.yyyy}}" Width="120"/>
+                <DataGridTextColumn Header="Гарантия до" Binding="{Binding WarrantyUntil, StringFormat={}{0:dd.MM.yyyy}}" Width="120"/>
                 <DataGridTextColumn Header="Ответственный" Binding="{Binding ResponsibleEmployee}" Width="150"/>
+                <DataGridTextColumn Header="Заметки" Binding="{Binding Notes}" Width="180"/>
+                <DataGridTextColumn Header="Синхронизация" Binding="{Binding SyncStatus}" Width="120"/>
             </DataGrid.Columns>
         </DataGrid>
     </Grid>
